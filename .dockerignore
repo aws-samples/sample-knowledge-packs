@@ -1,0 +1,19 @@
+# CDK and Node artifacts — prevent recursive copy during cdk synth
+infra/
+node_modules/
+cdk.out/
+
+# Git and IDE
+.git/
+.kiro/
+.venv/
+__pycache__/
+
+# Data directories
+data/
+research/
+
+# Misc
+*.pyc
+.pytest_cache/
+.ruff_cache/

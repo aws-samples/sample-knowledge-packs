@@ -1,0 +1,644 @@
+{
+  "schema": 1,
+  "applicationInfo": {
+    "name": "Knowledge Packs",
+    "description": "### Overview\nKnowledge Packs turns any documentation Git repository into a queryable MCP server backed by Amazon Bedrock Knowledge Bases with S3 Vectors. It is designed as an open-source reference architecture for ISVs and teams who want to ship AI-assisted documentation under their own brand.\n\n### Components\n- **KnowledgePackStack** (eu-west-1): S3 data bucket, S3 Vectors index, Bedrock Knowledge Base, S3 data source connector, CloudWatch logging.\n- **GatewayMcpStack** (eu-west-1): Cognito User Pool (M2M OAuth), AgentCore Runtime (JWT auth), AgentCore Gateway (noAuth inbound), OAuth credential provider (Custom Resource Lambda), Gateway Target.\n- **GatewayDomainStack** (us-east-1): CloudFront distribution, ACM certificate, WAF WebACL (IP rate limiting), Route 53 alias record.\n- **Sync pipeline**: Python script that clones a Git repo, preprocesses markdown, uploads to S3, triggers Bedrock ingestion.\n- **FastMCP server**: Python MCP server supporting stdio (local) and streamable-http (remote via AgentCore Runtime) transports. Multi-KB support via allowlist.\n\n### Trust boundaries\n1. Internet \u2192 CloudFront (WAF) \u2192 AgentCore Gateway: unauthenticated MCP clients.\n2. Gateway \u2192 Cognito token endpoint \u2192 AgentCore Runtime: M2M OAuth (client_credentials).\n3. Runtime \u2192 Bedrock Retrieve API: IAM role-based, scoped to specific KB ARNs.\n4. Operator workstation \u2192 S3 / Bedrock Agent API: sync pipeline with developer credentials.\n5. Custom Resource Lambda \u2192 AgentCore Identity + Secrets Manager: deployment-time only."
+  },
+  "architecture": {
+    "description": "### Data flow\n```\nDocs Git Repo \u2192 sync_docs.py \u2192 S3 Data Bucket \u2192 Bedrock KB (Titan Embed v2) \u2192 S3 Vectors Index\n```\n\n### Request flow\n```\nMCP Client \u2192 CloudFront (WAF rate limit) \u2192 AgentCore Gateway (noAuth)\n  \u2192 [OAuth client_credentials via Cognito] \u2192 AgentCore Runtime (JWT validated)\n  \u2192 FastMCP kb_server.py \u2192 KBClient \u2192 Bedrock Retrieve API \u2192 S3 Vectors\n```\n\n### Deployment flow\n```\nCDK deploy \u2192 CloudFormation \u2192 Custom Resource Lambda\n  \u2192 CreateOauth2CredentialProvider (AgentCore Identity API)\n  \u2192 Stores client secret in Secrets Manager\n```\n\n### Key design decisions\n- Gateway uses noAuth inbound to allow any MCP client to connect without pre-registration.\n- Runtime uses JWT auth; Gateway obtains tokens via Cognito M2M client_credentials flow.\n- WAF rate limits at 100 requests per 5 minutes per IP as defense-in-depth.\n- S3 data bucket has DESTROY removal policy and autoDeleteObjects for easy teardown.\n- Documentation content is public (open-source product docs), not sensitive data.\n\n### Gateway authentication rationale\nThe Gateway uses `authorizerType: NONE` for inbound requests. Per AWS documentation (https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-inbound-auth.html):\n\n> \"Do not use No Authorization gateways for testing or development purposes. No Authorization gateways should only be used for production gateways that you intend to make public after you have implemented all the security best practices.\"\n\nThe three required security best practices and our compliance:\n1. **Org-level IAM controls**: Use `bedrock-agentcore:GatewayAuthorizerType` condition key to restrict NONE gateway creation. Documented for deployers.\n2. **Custom throttling**: WAF WebACL with IP rate limiting (100 req/5 min) on CloudFront.\n3. **Non-sensitive targets**: KB contains public open-source documentation only.\n\n### Network visibility\nThe Gateway endpoint is internet-reachable. For private access, AWS supports VPC Interface Endpoints via `com.amazonaws.region.bedrock-agentcore.gateway` (https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/vpc-interface-endpoints.html). This routes traffic over the AWS private backbone, eliminating internet traversal. However, VPC endpoints only serve VPC-hosted agents \u2014 public MCP clients (IDEs) require internet reachability. See: https://aws.amazon.com/blogs/machine-learning/secure-ingress-connectivity-to-amazon-bedrock-agentcore-gateway-using-interface-vpc-endpoints/"
+  },
+  "dataflow": {
+    "description": "### Ingestion path (operator-initiated)\n1. Operator runs `make sync` which executes `sync_docs.py`.\n2. Script clones/pulls a public Git repository to local disk.\n3. Markdown files are preprocessed (frontmatter stripped, Jekyll tags removed, min-length filter).\n4. Cleaned files uploaded to S3 data bucket via `s3:PutObject`.\n5. Bedrock ingestion job triggered via `bedrock-agent:StartIngestionJob`.\n6. Bedrock reads from S3, generates embeddings via Titan Embed v2, stores in S3 Vectors.\n\n### Query path (user-initiated)\n1. MCP client sends POST to CloudFront custom domain `/mcp`.\n2. CloudFront forwards to AgentCore Gateway (HTTPS, no Host header forwarded).\n3. Gateway authenticates to Runtime via Cognito OAuth (client_credentials grant).\n4. Runtime validates JWT, invokes FastMCP server container.\n5. `query_docs` tool resolves KB alias from allowlist, calls `bedrock:Retrieve`.\n6. Results returned through the chain to the MCP client.\n\n### Sensitive data flows\n- Cognito client secret: created by Cognito, read by CDK AwsCustomResource, passed to Custom Resource Lambda, stored in Secrets Manager by AgentCore Identity.\n- JWT tokens: issued by Cognito, used by Gateway to authenticate to Runtime. Short-lived.\n- Documentation content: public open-source docs. Not classified as sensitive."
+  },
+  "assumptions": [
+    {
+      "id": "a6e71918-d228-42a4-8c80-654383f6afc6",
+      "numericId": 1,
+      "content": "Documentation content ingested into the Knowledge Base is public (open-source product docs) and does not contain sensitive, proprietary, or PII data.",
+      "tags": [
+        "data-classification"
+      ]
+    },
+    {
+      "id": "04869f6b-d7a1-414b-ba34-cb73c5a6cdc1",
+      "numericId": 2,
+      "content": "The sync pipeline (make sync) is only executed by authorized operators with appropriate AWS credentials, not by end users or automated triggers from untrusted sources.",
+      "tags": [
+        "access-control"
+      ]
+    },
+    {
+      "id": "57d63243-d2c8-48e4-981a-48aed33edf34",
+      "numericId": 3,
+      "content": "AgentCore Gateway and Runtime enforce their own transport-level security (TLS) and the Gateway handles OAuth token lifecycle management correctly.",
+      "tags": [
+        "infrastructure"
+      ]
+    },
+    {
+      "id": "fcce7f26-4531-470d-bcdb-a8c59e1b4114",
+      "numericId": 4,
+      "content": "The Cognito User Pool has self-sign-up disabled, so only the CDK-created M2M app client can obtain tokens. No human users authenticate via Cognito.",
+      "tags": [
+        "authentication"
+      ]
+    },
+    {
+      "id": "8cb86d71-3f15-496f-ba50-b69e8d8c0a03",
+      "numericId": 5,
+      "content": "CloudFront enforces HTTPS (viewer protocol policy: redirect-to-https) and the origin connection to Gateway is HTTPS-only.",
+      "tags": [
+        "transport-security"
+      ]
+    },
+    {
+      "id": "9a0d6df1-bd2d-4608-8f36-814e3967a4e4",
+      "numericId": 6,
+      "content": "Gateway authorizerType=NONE is used per AWS guidance for public-facing gateways serving non-sensitive data. AWS docs state: 'No Authorization gateways should only be used for production gateways that you intend to make public after you have implemented all the security best practices.' Our implementation follows all three listed best practices: WAF throttling, non-sensitive targets, and org-level IAM condition key awareness.",
+      "tags": [
+        "scope",
+        "authentication"
+      ],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Source: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-inbound-auth.html (No Authorization section, Security Best Practices). For private access, use VPC endpoint com.amazonaws.region.bedrock-agentcore.gateway per https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/vpc-interface-endpoints.html"
+        }
+      ]
+    },
+    {
+      "id": "32eeb346-bfd3-4218-92d4-89391cf7fc89",
+      "numericId": 7,
+      "content": "The AgentCore Gateway endpoint is internet-reachable by design. Private access is possible via VPC Interface Endpoint (com.amazonaws.region.bedrock-agentcore.gateway) using AWS PrivateLink, but this only serves VPC-hosted agents \u2014 not public MCP clients connecting through CloudFront. For the ISV 'any IDE connects' use case, internet reachability is required.",
+      "tags": [
+        "network",
+        "architecture"
+      ],
+      "metadata": [
+        {
+          "key": "Comments",
+          "value": "Sources: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/vpc-interface-endpoints.html ('AgentCore Gateway uses endpoint com.amazonaws.region.bedrock-agentcore.gateway'). https://aws.amazon.com/blogs/machine-learning/secure-ingress-connectivity-to-amazon-bedrock-agentcore-gateway-using-interface-vpc-endpoints/ ('By implementing interface VPC endpoints, organizations can route these communications through the AWS secure internal network backbone instead')."
+        }
+      ]
+    }
+  ],
+  "threats": [
+    {
+      "id": "8acb6361-5fd0-44ca-8930-f1cebc628419",
+      "numericId": 1,
+      "threatSource": "An internet-based actor",
+      "prerequisites": "",
+      "threatAction": "send a high volume of MCP requests to the public CloudFront endpoint",
+      "threatImpact": "excessive Bedrock Retrieve API costs and degraded service availability for legitimate users",
+      "impactedGoal": [
+        "availability",
+        "financial"
+      ],
+      "impactedAssets": [
+        "CloudFront distribution",
+        "AgentCore Gateway",
+        "Bedrock Knowledge Base"
+      ],
+      "statement": "An internet-based actor can send a high volume of MCP requests to the public CloudFront endpoint, which leads to excessive Bedrock Retrieve API costs and degraded service availability for legitimate users, resulting in reduced availability of CloudFront distribution, AgentCore Gateway, Bedrock Knowledge Base.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "D"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        }
+      ],
+      "tags": [
+        "dos",
+        "cost"
+      ]
+    },
+    {
+      "id": "e30007cd-9bc5-41ba-bf13-c74e06d96817",
+      "numericId": 2,
+      "threatSource": "An internet-based actor",
+      "prerequisites": "",
+      "threatAction": "craft MCP tool calls with prompt-injection payloads in the query parameter to manipulate retrieval results or elicit unintended model behavior downstream",
+      "threatImpact": "misleading or manipulated documentation results returned to the MCP client",
+      "impactedGoal": [
+        "integrity"
+      ],
+      "impactedAssets": [
+        "Bedrock Knowledge Base",
+        "MCP query results"
+      ],
+      "statement": "An internet-based actor can craft MCP tool calls with prompt-injection payloads in the query parameter to manipulate retrieval results or elicit unintended model behavior downstream, which leads to misleading or manipulated documentation results returned to the MCP client, resulting in reduced integrity of Bedrock Knowledge Base, MCP query results.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "T"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        }
+      ],
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "f7313b2a-f6bb-4180-80f6-aab32d6393ae",
+      "numericId": 3,
+      "threatSource": "An actor",
+      "prerequisites": "with write access to the source documentation Git repository",
+      "threatAction": "inject malicious content into markdown files that gets ingested into the Knowledge Base and served to all querying users",
+      "threatImpact": "poisoned documentation results containing misinformation, phishing links, or social engineering content",
+      "impactedGoal": [
+        "integrity",
+        "confidentiality"
+      ],
+      "impactedAssets": [
+        "S3 data bucket",
+        "Bedrock Knowledge Base",
+        "S3 Vectors index"
+      ],
+      "statement": "An actor with write access to the source documentation Git repository can inject malicious content into markdown files that gets ingested into the Knowledge Base and served to all querying users, which leads to poisoned documentation results containing misinformation, phishing links, or social engineering content, resulting in reduced integrity, confidentiality of S3 data bucket, Bedrock Knowledge Base, S3 Vectors index.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "T"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        }
+      ],
+      "tags": [
+        "supply-chain",
+        "data-poisoning"
+      ]
+    },
+    {
+      "id": "8195cf54-8433-4a15-abc6-e43a2cf06805",
+      "numericId": 4,
+      "threatSource": "An actor",
+      "prerequisites": "with access to the AWS account or CloudFormation stack outputs",
+      "threatAction": "extract the Cognito client ID and client secret from stack outputs, Secrets Manager, or CloudWatch logs to directly call the Runtime bypassing the Gateway",
+      "threatImpact": "unauthorized direct access to the AgentCore Runtime without WAF rate limiting or Gateway controls",
+      "impactedGoal": [
+        "confidentiality",
+        "integrity"
+      ],
+      "impactedAssets": [
+        "Cognito M2M credentials",
+        "AgentCore Runtime"
+      ],
+      "statement": "An actor with access to the AWS account or CloudFormation stack outputs can extract the Cognito client ID and client secret from stack outputs, Secrets Manager, or CloudWatch logs to directly call the Runtime bypassing the Gateway, which leads to unauthorized direct access to the AgentCore Runtime without WAF rate limiting or Gateway controls, resulting in reduced confidentiality, integrity of Cognito M2M credentials, AgentCore Runtime.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "I",
+            "E"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        }
+      ],
+      "tags": [
+        "credential-exposure"
+      ]
+    },
+    {
+      "id": "a6ec4e26-2a80-494c-ab7f-6d9cf498295a",
+      "numericId": 5,
+      "threatSource": "An internet-based actor",
+      "prerequisites": "",
+      "threatAction": "enumerate KB aliases by sending query_docs requests with different kb parameter values and observing error messages that reveal valid alias names",
+      "threatImpact": "disclosure of internal Knowledge Base alias names and structure",
+      "impactedGoal": [
+        "confidentiality"
+      ],
+      "impactedAssets": [
+        "KB allowlist configuration"
+      ],
+      "statement": "An internet-based actor can enumerate KB aliases by sending query_docs requests with different kb parameter values and observing error messages that reveal valid alias names, which leads to disclosure of internal Knowledge Base alias names and structure, resulting in reduced confidentiality of KB allowlist configuration.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "I"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Low"
+        }
+      ],
+      "tags": [
+        "information-disclosure"
+      ]
+    },
+    {
+      "id": "776be4e9-a65e-44c6-98e3-60a55cfa2cf3",
+      "numericId": 6,
+      "threatSource": "An actor",
+      "prerequisites": "with access to the S3 data bucket",
+      "threatAction": "upload or modify files in the S3 data bucket outside the sync pipeline, bypassing preprocessing and validation",
+      "threatImpact": "unvalidated or malicious content ingested into the Knowledge Base on next sync",
+      "impactedGoal": [
+        "integrity"
+      ],
+      "impactedAssets": [
+        "S3 data bucket",
+        "Bedrock Knowledge Base"
+      ],
+      "statement": "An actor with access to the S3 data bucket can upload or modify files in the S3 data bucket outside the sync pipeline, bypassing preprocessing and validation, which leads to unvalidated or malicious content ingested into the Knowledge Base on next sync, resulting in reduced integrity of S3 data bucket, Bedrock Knowledge Base.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "T"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        }
+      ],
+      "tags": [
+        "data-integrity"
+      ]
+    },
+    {
+      "id": "07619b8f-2272-40a6-a5f4-950d94d3a62c",
+      "numericId": 7,
+      "threatSource": "An internet-based actor",
+      "prerequisites": "",
+      "threatAction": "send requests with large num_results values or extremely long query strings to the MCP endpoint to increase Bedrock API costs and processing time",
+      "threatImpact": "increased per-request cost and potential timeout of legitimate requests",
+      "impactedGoal": [
+        "availability",
+        "financial"
+      ],
+      "impactedAssets": [
+        "Bedrock Retrieve API",
+        "AgentCore Runtime"
+      ],
+      "statement": "An internet-based actor can send requests with large num_results values or extremely long query strings to the MCP endpoint to increase Bedrock API costs and processing time, which leads to increased per-request cost and potential timeout of legitimate requests, resulting in reduced availability of Bedrock Retrieve API, AgentCore Runtime.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "D"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        }
+      ],
+      "tags": [
+        "dos",
+        "cost",
+        "input-validation"
+      ]
+    },
+    {
+      "id": "5274624f-5fcd-4cbb-b328-6d4dd45d4355",
+      "numericId": 8,
+      "threatSource": "An actor",
+      "prerequisites": "with network access to the AgentCore Runtime endpoint",
+      "threatAction": "bypass the CloudFront and WAF layer by calling the AgentCore Gateway endpoint directly using the gateway URL from stack outputs",
+      "threatImpact": "requests reach the Gateway without WAF rate limiting or CloudFront protections",
+      "impactedGoal": [
+        "availability"
+      ],
+      "impactedAssets": [
+        "AgentCore Gateway",
+        "AgentCore Runtime"
+      ],
+      "statement": "An actor with network access to the AgentCore Runtime endpoint can bypass the CloudFront and WAF layer by calling the AgentCore Gateway endpoint directly using the gateway URL from stack outputs, which leads to requests reach the Gateway without WAF rate limiting or CloudFront protections, resulting in reduced availability of AgentCore Gateway, AgentCore Runtime.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "D",
+            "E"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        }
+      ],
+      "tags": [
+        "bypass",
+        "waf"
+      ]
+    },
+    {
+      "id": "878d5510-4d0a-4cbb-b06c-b82dc4fc8a0c",
+      "numericId": 9,
+      "threatSource": "An actor",
+      "prerequisites": "who compromises the Custom Resource Lambda execution environment",
+      "threatAction": "use the Lambda's broad IAM permissions (secretsmanager:*, bedrock-agentcore:*) to access or create arbitrary secrets and credential providers",
+      "threatImpact": "unauthorized access to secrets and ability to create rogue OAuth credential providers in the account",
+      "impactedGoal": [
+        "confidentiality",
+        "integrity"
+      ],
+      "impactedAssets": [
+        "Secrets Manager",
+        "AgentCore Identity",
+        "Custom Resource Lambda"
+      ],
+      "statement": "An actor who compromises the Custom Resource Lambda execution environment can use the Lambda's broad IAM permissions (secretsmanager:*, bedrock-agentcore:*) to access or create arbitrary secrets and credential providers, which leads to unauthorized access to secrets and ability to create rogue OAuth credential providers in the account, resulting in reduced confidentiality, integrity of Secrets Manager, AgentCore Identity, Custom Resource Lambda.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "E"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        }
+      ],
+      "tags": [
+        "iam",
+        "least-privilege"
+      ]
+    },
+    {
+      "id": "10ab24dc-0c44-4859-a01b-456347251b22",
+      "numericId": 10,
+      "threatSource": "An actor",
+      "prerequisites": "with access to the container image or runtime environment",
+      "threatAction": "extract environment variables (KB_ALLOWLIST, DEFAULT_KB) from the AgentCore Runtime container to discover all configured Knowledge Base IDs",
+      "threatImpact": "disclosure of Bedrock Knowledge Base resource IDs enabling targeted attacks against those resources",
+      "impactedGoal": [
+        "confidentiality"
+      ],
+      "impactedAssets": [
+        "AgentCore Runtime container",
+        "Knowledge Base IDs"
+      ],
+      "statement": "An actor with access to the container image or runtime environment can extract environment variables (KB_ALLOWLIST, DEFAULT_KB) from the AgentCore Runtime container to discover all configured Knowledge Base IDs, which leads to disclosure of Bedrock Knowledge Base resource IDs enabling targeted attacks against those resources, resulting in reduced confidentiality of AgentCore Runtime container, Knowledge Base IDs.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "I"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Low"
+        }
+      ],
+      "tags": [
+        "information-disclosure",
+        "container"
+      ]
+    }
+  ],
+  "mitigations": [
+    {
+      "id": "92494178-29b2-4f0c-8816-cd316ebe689d",
+      "numericId": 1,
+      "content": "WAF WebACL with IP-based rate limiting (100 requests per 5 minutes per IP) attached to CloudFront distribution blocks volumetric abuse.",
+      "status": "mitigationResolved",
+      "tags": [
+        "dos",
+        "cost"
+      ]
+    },
+    {
+      "id": "bd4a3a82-d038-4318-a19d-2dbb3d1ab247",
+      "numericId": 2,
+      "content": "CloudFront enforces HTTPS-only viewer protocol and HTTPS-only origin connection, preventing man-in-the-middle attacks on the request path.",
+      "status": "mitigationResolved",
+      "tags": [
+        "transport-security"
+      ]
+    },
+    {
+      "id": "4f2b7863-7138-4e99-b949-6dccbdcd5295",
+      "numericId": 3,
+      "content": "AgentCore Runtime validates JWT tokens from Cognito with audience (client ID) checking, ensuring only the Gateway's M2M client can invoke the Runtime.",
+      "status": "mitigationResolved",
+      "tags": [
+        "authentication"
+      ]
+    },
+    {
+      "id": "746df7e9-8d27-48ca-8c8f-68a61683fb8d",
+      "numericId": 4,
+      "content": "Cognito User Pool has selfSignUpEnabled: false, preventing unauthorized creation of new app clients or user accounts.",
+      "status": "mitigationResolved",
+      "tags": [
+        "authentication"
+      ]
+    },
+    {
+      "id": "8cc89bbd-7fcc-46b5-bb08-0a2816bd4e12",
+      "numericId": 5,
+      "content": "KB allowlist pattern restricts which Knowledge Base IDs can be queried. Invalid aliases return an error without calling Bedrock, preventing unauthorized KB access.",
+      "status": "mitigationResolved",
+      "tags": [
+        "access-control"
+      ]
+    },
+    {
+      "id": "d68a3a44-0b46-4c0e-a36e-d2fae0c24e7a",
+      "numericId": 6,
+      "content": "Bedrock Retrieve API IAM policy is scoped to specific KB ARNs (not *), limiting the Runtime role to only the configured Knowledge Bases.",
+      "status": "mitigationResolved",
+      "tags": [
+        "iam",
+        "least-privilege"
+      ]
+    },
+    {
+      "id": "b3425030-b215-42b2-bbf0-86c8ea66a3ea",
+      "numericId": 7,
+      "content": "Sync pipeline preprocesses markdown (strips frontmatter, Jekyll tags) and enforces minimum content length (200 chars), reducing the attack surface for content injection.",
+      "status": "mitigationResolved",
+      "tags": [
+        "data-integrity",
+        "input-validation"
+      ]
+    },
+    {
+      "id": "18d1f28b-4fe9-4ccf-a597-d8e8263eb71b",
+      "numericId": 8,
+      "content": "S3 data bucket configured with blockPublicAccess: BLOCK_ALL and enforceSSL: true, preventing public access and unencrypted connections.",
+      "status": "mitigationResolved",
+      "tags": [
+        "data-integrity",
+        "access-control"
+      ]
+    },
+    {
+      "id": "7a12de7b-991d-41c3-be19-14968b0123e1",
+      "numericId": 9,
+      "content": "Add input validation in the query_docs tool to cap num_results (e.g., max 10) and query string length to prevent cost amplification attacks.",
+      "status": "mitigationResolved",
+      "tags": [
+        "input-validation",
+        "cost"
+      ]
+    },
+    {
+      "id": "ea79be1c-b67e-4844-b72d-d2e1875ed662",
+      "numericId": 10,
+      "content": "Scope Custom Resource Lambda IAM permissions from wildcard (*) to specific resource ARNs for secretsmanager and bedrock-agentcore actions.",
+      "status": "mitigationResolved",
+      "tags": [
+        "iam",
+        "least-privilege"
+      ]
+    },
+    {
+      "id": "e236a8a4-1506-4b80-a209-cd7f3b19f173",
+      "numericId": 11,
+      "content": "CloudFront adds a custom origin header (X-Origin-Verify) when forwarding to the Gateway. This is defense-in-depth: it does not provide cryptographic origin verification since AgentCore Gateway is a managed service that cannot validate headers. However, it raises the bar against casual direct access \u2014 an attacker would need to discover both the Gateway URL and replicate the header. For stronger protection, use Gateway auth (authorizerType != NONE) or Gateway interceptors for request validation.",
+      "status": "mitigationResolved",
+      "tags": [
+        "bypass",
+        "waf"
+      ]
+    },
+    {
+      "id": "a2097759-45d0-4ad8-8dd9-575b2f2b2b2a",
+      "numericId": 12,
+      "content": "The query_docs error message for invalid KB aliases reveals the full list of valid aliases. Change to a generic error message that does not enumerate available aliases.",
+      "status": "mitigationResolved",
+      "tags": [
+        "information-disclosure"
+      ]
+    }
+  ],
+  "mitigationLinks": [
+    {
+      "mitigationId": "92494178-29b2-4f0c-8816-cd316ebe689d",
+      "linkedId": "8acb6361-5fd0-44ca-8930-f1cebc628419"
+    },
+    {
+      "mitigationId": "7a12de7b-991d-41c3-be19-14968b0123e1",
+      "linkedId": "8acb6361-5fd0-44ca-8930-f1cebc628419"
+    },
+    {
+      "mitigationId": "8cc89bbd-7fcc-46b5-bb08-0a2816bd4e12",
+      "linkedId": "e30007cd-9bc5-41ba-bf13-c74e06d96817"
+    },
+    {
+      "mitigationId": "b3425030-b215-42b2-bbf0-86c8ea66a3ea",
+      "linkedId": "e30007cd-9bc5-41ba-bf13-c74e06d96817"
+    },
+    {
+      "mitigationId": "b3425030-b215-42b2-bbf0-86c8ea66a3ea",
+      "linkedId": "f7313b2a-f6bb-4180-80f6-aab32d6393ae"
+    },
+    {
+      "mitigationId": "18d1f28b-4fe9-4ccf-a597-d8e8263eb71b",
+      "linkedId": "f7313b2a-f6bb-4180-80f6-aab32d6393ae"
+    },
+    {
+      "mitigationId": "4f2b7863-7138-4e99-b949-6dccbdcd5295",
+      "linkedId": "8195cf54-8433-4a15-abc6-e43a2cf06805"
+    },
+    {
+      "mitigationId": "746df7e9-8d27-48ca-8c8f-68a61683fb8d",
+      "linkedId": "8195cf54-8433-4a15-abc6-e43a2cf06805"
+    },
+    {
+      "mitigationId": "ea79be1c-b67e-4844-b72d-d2e1875ed662",
+      "linkedId": "8195cf54-8433-4a15-abc6-e43a2cf06805"
+    },
+    {
+      "mitigationId": "a2097759-45d0-4ad8-8dd9-575b2f2b2b2a",
+      "linkedId": "a6ec4e26-2a80-494c-ab7f-6d9cf498295a"
+    },
+    {
+      "mitigationId": "b3425030-b215-42b2-bbf0-86c8ea66a3ea",
+      "linkedId": "776be4e9-a65e-44c6-98e3-60a55cfa2cf3"
+    },
+    {
+      "mitigationId": "18d1f28b-4fe9-4ccf-a597-d8e8263eb71b",
+      "linkedId": "776be4e9-a65e-44c6-98e3-60a55cfa2cf3"
+    },
+    {
+      "mitigationId": "92494178-29b2-4f0c-8816-cd316ebe689d",
+      "linkedId": "07619b8f-2272-40a6-a5f4-950d94d3a62c"
+    },
+    {
+      "mitigationId": "7a12de7b-991d-41c3-be19-14968b0123e1",
+      "linkedId": "07619b8f-2272-40a6-a5f4-950d94d3a62c"
+    },
+    {
+      "mitigationId": "92494178-29b2-4f0c-8816-cd316ebe689d",
+      "linkedId": "5274624f-5fcd-4cbb-b328-6d4dd45d4355"
+    },
+    {
+      "mitigationId": "e236a8a4-1506-4b80-a209-cd7f3b19f173",
+      "linkedId": "5274624f-5fcd-4cbb-b328-6d4dd45d4355"
+    },
+    {
+      "mitigationId": "ea79be1c-b67e-4844-b72d-d2e1875ed662",
+      "linkedId": "878d5510-4d0a-4cbb-b06c-b82dc4fc8a0c"
+    },
+    {
+      "mitigationId": "d68a3a44-0b46-4c0e-a36e-d2fae0c24e7a",
+      "linkedId": "878d5510-4d0a-4cbb-b06c-b82dc4fc8a0c"
+    },
+    {
+      "mitigationId": "8cc89bbd-7fcc-46b5-bb08-0a2816bd4e12",
+      "linkedId": "10ab24dc-0c44-4859-a01b-456347251b22"
+    },
+    {
+      "mitigationId": "d68a3a44-0b46-4c0e-a36e-d2fae0c24e7a",
+      "linkedId": "10ab24dc-0c44-4859-a01b-456347251b22"
+    }
+  ],
+  "assumptionLinks": [
+    {
+      "type": "Threat",
+      "assumptionId": "a6e71918-d228-42a4-8c80-654383f6afc6",
+      "linkedId": "e30007cd-9bc5-41ba-bf13-c74e06d96817"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "a6e71918-d228-42a4-8c80-654383f6afc6",
+      "linkedId": "f7313b2a-f6bb-4180-80f6-aab32d6393ae"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "04869f6b-d7a1-414b-ba34-cb73c5a6cdc1",
+      "linkedId": "776be4e9-a65e-44c6-98e3-60a55cfa2cf3"
+    },
+    {
+      "type": "Mitigation",
+      "assumptionId": "57d63243-d2c8-48e4-981a-48aed33edf34",
+      "linkedId": "bd4a3a82-d038-4318-a19d-2dbb3d1ab247"
+    },
+    {
+      "type": "Mitigation",
+      "assumptionId": "fcce7f26-4531-470d-bcdb-a8c59e1b4114",
+      "linkedId": "746df7e9-8d27-48ca-8c8f-68a61683fb8d"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "9a0d6df1-bd2d-4608-8f36-814e3967a4e4",
+      "linkedId": "878d5510-4d0a-4cbb-b06c-b82dc4fc8a0c"
+    }
+  ]
+}

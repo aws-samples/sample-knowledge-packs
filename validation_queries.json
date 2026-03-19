@@ -1,0 +1,14 @@
+[
+  {
+    "question": "What is the overall architecture?",
+    "expected_topic": "architecture overview"
+  },
+  {
+    "question": "How do I get started with the API?",
+    "expected_topic": "API getting started"
+  },
+  {
+    "question": "What are the deployment options?",
+    "expected_topic": "deployment"
+  }
+]

@@ -1,0 +1,8 @@
+{
+  "name": "oauth-provider-custom-resource",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-bedrock-agentcore-control": "^3.993.0"
+  }
+}

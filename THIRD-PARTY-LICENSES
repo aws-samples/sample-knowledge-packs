@@ -1,0 +1,22 @@
+# Third-Party Licenses
+
+This project includes the following third-party dependencies:
+
+## Python Dependencies
+
+| Package | License | URL |
+|---------|---------|-----|
+| boto3 | Apache-2.0 | https://github.com/boto/boto3 |
+| fastmcp | MIT | https://github.com/jlowin/fastmcp |
+| hypothesis | MPL-2.0 | https://github.com/HypothesisWorks/hypothesis |
+| pytest | MIT | https://github.com/pytest-dev/pytest |
+| ruff | MIT | https://github.com/astral-sh/ruff |
+
+## CDK / Node.js Dependencies
+
+| Package | License | URL |
+|---------|---------|-----|
+| aws-cdk-lib | Apache-2.0 | https://github.com/aws/aws-cdk |
+| @aws-cdk/aws-bedrock-agentcore-alpha | Apache-2.0 | https://github.com/aws/aws-cdk |
+| constructs | Apache-2.0 | https://github.com/aws/constructs |
+| @aws-sdk/client-bedrock-agentcore-control | Apache-2.0 | https://github.com/aws/aws-sdk-js-v3 |

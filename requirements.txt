@@ -1,0 +1,5 @@
+boto3
+fastmcp>=3.0,<4.0
+hypothesis
+pytest
+ruff

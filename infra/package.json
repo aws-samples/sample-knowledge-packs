@@ -1,0 +1,21 @@
+{
+  "name": "knowledge-pack-infra",
+  "version": "1.0.0",
+  "description": "CDK infrastructure for the product Docs Knowledge Base",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "cdk": "cdk"
+  },
+  "dependencies": {
+    "@aws-cdk/aws-bedrock-agentcore-alpha": "^2.238.0-alpha.0",
+    "aws-cdk-lib": "^2.170.0",
+    "constructs": "^10.4.2"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.170.0",
+    "cdk-nag": "^2.37.55",
+    "ts-node": "^10.9.2",
+    "typescript": "~5.7.0"
+  }
+}
